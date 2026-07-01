@@ -9,6 +9,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const opts = b.addOptions();
+    opts.addOption(usize, "reps", b.option(usize, "reps", "build cycles per measured run") orelse 10);
+    opts.addOption(usize, "jitter", b.option(usize, "jitter", "max %% random downward size jitter per rep") orelse 10);
+    opts.addOption(bool, "track", b.option(bool, "track", "report allocation counts/peaks") orelse false);
+    opts.addOption(bool, "shuffle", b.option(bool, "shuffle", "use zBench's ShufflingAllocator") orelse false);
+
     const exe = b.addExecutable(.{
         .name = "collection_bench",
         .root_module = b.createModule(.{
@@ -17,6 +23,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zbench", .module = zbench.module("zbench") },
+                .{ .name = "build_options", .module = opts.createModule() },
             },
         }),
     });

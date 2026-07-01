@@ -1,3 +1,6 @@
 .zig-cache
 zig-out
 zig-pkg
+
+results.txt
+benchmark_plot.html

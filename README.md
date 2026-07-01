@@ -27,6 +27,34 @@ prefix, checks whether the first member is divisible by 10, and if so appends /
 inserts that member. The `assume_capacity` case walks the prefix twice: once to
 size the collection, once to fill it.
 
+## Avoiding a best-case allocator
+
+Building the same collection at the same size every time lets the allocator's
+free list settle into an ideal state: it hands back the exact block it just
+freed, with no syscall and a warm cache. That makes the numbers unrealistically
+kind to allocation-heavy code. Two measures perturb it:
+
+- **Jittered size** — each build shrinks the nominal size by a random
+  `0..jitter`% (default 10%, downward so it stays within the shared array), so
+  successive requests are rarely the same size and can't be trivially reused.
+  A per-benchmark PRNG advances continuously across all builds, so the allocator
+  never sees a short, cacheable cycle of sizes.
+- **Repeated builds** — each measured run performs `reps` build/free cycles
+  (default 10), so a single timing sample averages over several random sizes
+  instead of reflecting one lucky one. (Reported times are therefore per `reps`
+  builds; the mode-to-mode ratios are unaffected.)
+
+zBench also ships two purpose-built knobs, exposed here as build options:
+
+- `-Dshuffle=true` uses its experimental `ShufflingAllocator`, which randomises
+  allocation addresses/layout to reduce predictability (at a real overhead cost).
+- `-Dtrack=true` reports allocation counts/peaks per benchmark. Note: this
+  zBench version's tracking allocator mis-accounts `remap`/`resize`, so its
+  reported peak underflows to `16 EiB` once `ArrayList` growth kicks in; it is
+  only trustworthy for the small, non-remap cases.
+
+The rep count and jitter are also tunable: `-Dreps=N`, `-Djitter=N`.
+
 ## Running
 
 Requires Zig 0.16.0. The dependency is pinned to zBench's `zig-0.16.0` branch —
@@ -42,3 +70,18 @@ or run the built binary directly:
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/collection_bench
 ```
+
+## Plotting
+
+`plot.py` parses the benchmark table and writes a self-contained HTML file with
+a log-log Plotly chart (loaded from a CDN) of time-per-run versus size, one line
+per collection/mode with min/max error bars:
+
+```sh
+./zig-out/bin/collection_bench > results.txt
+python3 plot.py results.txt -o benchmark_plot.html
+```
+
+With no input file it runs the binary itself; it also accepts piped stdin
+(`./zig-out/bin/collection_bench | python3 plot.py`). Open `benchmark_plot.html`
+in a browser.

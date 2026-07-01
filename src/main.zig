@@ -1,5 +1,12 @@
 const std = @import("std");
 const zbench = @import("zbench");
+const options = @import("build_options");
+
+/// Number of build cycles performed per measured run.
+const reps: usize = options.reps;
+/// Each rep shrinks the nominal size by a random 0..jitter_pct percent, so the
+/// allocator never sees a repeated, exactly-sized request it can trivially reuse.
+const jitter_pct: usize = options.jitter;
 
 /// A record with 8 usize members. Only the first member is inspected by the
 /// benchmarks; the rest exist to give each element a realistic footprint.
@@ -40,23 +47,31 @@ fn Bench(comptime collection: Collection, comptime mode: Mode) type {
     return struct {
         const Self = @This();
         size: usize,
+        prng: std.Random.DefaultPrng,
 
         pub fn run(self: *Self, base: std.mem.Allocator) void {
-            const prefix = items[0..self.size];
+            const rand = self.prng.random();
+            const span = self.size * jitter_pct / 100;
 
-            var arena: std.heap.ArenaAllocator = undefined;
-            const gpa = switch (mode) {
-                .no_assume_capacity_arena => a: {
-                    arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-                    break :a arena.allocator();
-                },
-                else => base,
-            };
-            defer if (mode == .no_assume_capacity_arena) arena.deinit();
+            var rep: usize = 0;
+            while (rep < reps) : (rep += 1) {
+                const n = @max(1, self.size - rand.uintLessThan(usize, span + 1));
+                const prefix = items[0..n];
 
-            switch (collection) {
-                .array_list => runList(mode, gpa, prefix),
-                .hash_set => runSet(mode, gpa, prefix),
+                var arena: std.heap.ArenaAllocator = undefined;
+                const gpa = switch (mode) {
+                    .no_assume_capacity_arena => a: {
+                        arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                        break :a arena.allocator();
+                    },
+                    else => base,
+                };
+                defer if (mode == .no_assume_capacity_arena) arena.deinit();
+
+                switch (collection) {
+                    .array_list => runList(mode, gpa, prefix),
+                    .hash_set => runSet(mode, gpa, prefix),
+                }
             }
         }
     };
@@ -124,7 +139,11 @@ pub fn main(init: std.process.Init) !void {
     }
     items = backing;
 
-    var bench = zbench.Benchmark.init(gpa, .{ .time_budget_ns = 1_000_000_000 });
+    var bench = zbench.Benchmark.init(gpa, .{
+        .time_budget_ns = 1_000_000_000,
+        .track_allocations = options.track,
+        .use_shuffling_allocator = options.shuffle,
+    });
     defer bench.deinit();
 
     // Context instances need stable addresses for the duration of the run.
@@ -133,12 +152,14 @@ pub fn main(init: std.process.Init) !void {
     const ca = ctx_arena.allocator();
 
     @setEvalBranchQuota(20_000);
+    var seed: u64 = 0x9e3779b97f4a7c15;
     inline for (.{ Collection.array_list, Collection.hash_set }) |collection| {
         inline for (.{ Mode.no_assume_capacity, Mode.assume_capacity, Mode.no_assume_capacity_arena }) |mode| {
             inline for (sizes) |size| {
                 const T = Bench(collection, mode);
                 const ctx = try ca.create(T);
-                ctx.* = .{ .size = size };
+                ctx.* = .{ .size = size, .prng = std.Random.DefaultPrng.init(seed) };
+                seed +%= 0x2545f4914f6cdd1d;
                 const name = std.fmt.comptimePrint("{s}/{s}/{d}", .{
                     @tagName(collection),
                     @tagName(mode),
