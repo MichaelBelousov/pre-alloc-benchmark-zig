@@ -17,6 +17,10 @@ Each is run across sizes 10, 100, 1000, 1_000_000, and 100_000_000 in three mode
   `*AssumeCapacity` variants.
 - `no_assume_capacity_arena` — same as `no_assume_capacity` but the collection
   lives in an `ArenaAllocator` (backed by the page allocator).
+- `no_assume_capacity_live` — same as `no_assume_capacity`, but all `reps`
+  collections of a measured run are held live at once and freed together, forcing
+  the allocator to grow its footprint and fragment instead of reusing one
+  just-freed block. Only registered for sizes ≤ 1,000,000 to bound memory.
 
 ## Setup (not measured)
 

@@ -22,7 +22,19 @@ const Item = struct {
 };
 
 const Collection = enum { array_list, hash_set };
-const Mode = enum { no_assume_capacity, assume_capacity, no_assume_capacity_arena };
+const Mode = enum {
+    no_assume_capacity,
+    assume_capacity,
+    no_assume_capacity_arena,
+    /// Like `no_assume_capacity`, but all `reps` collections are held live at
+    /// once before being freed together, forcing the allocator to actually grow
+    /// its footprint and fragment rather than reuse one just-freed block.
+    no_assume_capacity_live,
+};
+
+/// `no_assume_capacity_live` keeps `reps` collections resident simultaneously,
+/// so it is only registered for sizes at or below this cap to bound memory use.
+const live_max_size: usize = 1_000_000;
 
 /// Benchmarked sizes. The largest is also the length of the shared backing
 /// array generated once during setup; every case operates on a prefix of it.
@@ -52,6 +64,11 @@ fn Bench(comptime collection: Collection, comptime mode: Mode) type {
         pub fn run(self: *Self, base: std.mem.Allocator) void {
             const rand = self.prng.random();
             const span = self.size * jitter_pct / 100;
+
+            if (mode == .no_assume_capacity_live) {
+                runLive(collection, base, rand, self.size, span);
+                return;
+            }
 
             var rep: usize = 0;
             while (rep < reps) : (rep += 1) {
@@ -121,6 +138,53 @@ fn runSet(comptime mode: Mode, gpa: std.mem.Allocator, prefix: []const Item) voi
     std.mem.doNotOptimizeAway(set.count());
 }
 
+/// Build `reps` collections without freeing between them, so they all stay live
+/// until freed together at the end. Each gets its own jittered size.
+fn runLive(
+    comptime collection: Collection,
+    gpa: std.mem.Allocator,
+    rand: std.Random,
+    size: usize,
+    span: usize,
+) void {
+    const nextSize = struct {
+        fn f(r: std.Random, s: usize, sp: usize) usize {
+            return @max(1, s - r.uintLessThan(usize, sp + 1));
+        }
+    }.f;
+
+    switch (collection) {
+        .array_list => {
+            var lists: [reps]std.ArrayList(usize) = undefined;
+            for (&lists) |*l| l.* = .empty;
+            defer for (&lists) |*l| l.deinit(gpa);
+
+            var total: usize = 0;
+            for (&lists) |*l| {
+                for (items[0..nextSize(rand, size, span)]) |it| {
+                    if (kept(it)) |v| l.append(gpa, v) catch @panic("OOM");
+                }
+                total += l.items.len;
+            }
+            std.mem.doNotOptimizeAway(total);
+        },
+        .hash_set => {
+            var sets: [reps]std.AutoHashMapUnmanaged(usize, void) = undefined;
+            for (&sets) |*s| s.* = .empty;
+            defer for (&sets) |*s| s.deinit(gpa);
+
+            var total: usize = 0;
+            for (&sets) |*s| {
+                for (items[0..nextSize(rand, size, span)]) |it| {
+                    if (kept(it)) |v| s.put(gpa, v, {}) catch @panic("OOM");
+                }
+                total += s.count();
+            }
+            std.mem.doNotOptimizeAway(total);
+        },
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const stdout: std.Io.File = .stdout();
@@ -154,8 +218,14 @@ pub fn main(init: std.process.Init) !void {
     @setEvalBranchQuota(20_000);
     var seed: u64 = 0x9e3779b97f4a7c15;
     inline for (.{ Collection.array_list, Collection.hash_set }) |collection| {
-        inline for (.{ Mode.no_assume_capacity, Mode.assume_capacity, Mode.no_assume_capacity_arena }) |mode| {
+        inline for (.{
+            Mode.no_assume_capacity,
+            Mode.assume_capacity,
+            Mode.no_assume_capacity_arena,
+            Mode.no_assume_capacity_live,
+        }) |mode| {
             inline for (sizes) |size| {
+                if (mode == .no_assume_capacity_live and size > live_max_size) continue;
                 const T = Bench(collection, mode);
                 const ctx = try ca.create(T);
                 ctx.* = .{ .size = size, .prng = std.Random.DefaultPrng.init(seed) };
